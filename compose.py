@@ -1,222 +1,202 @@
 #!/usr/bin/env python3
-"""Render the v4 front page for news-image-20261120 as entry.png.
+"""Render the approved v4 front page for 20 November 2026.
 
-Page: 1024x1024 broadsheet front page, "THE WORLD TODAY", dated
-Friday, November 20, 2026. Compared with the v3 page of 19 November
-(dense columns of small body text that turned to mush at 300 px), v4
-carries far less text at far larger sizes: a giant red date, a two-line
-headline, one deck line, a dominant hero photo, three pictured stories
-with headline only, and a one-line IN BRIEF strip. All photos are local
-files under assets/, composed with Pillow only; no network anywhere.
-Run:  python3 compose.py
+Rebuilds the "THE WORLD TODAY" one-page newspaper (1024x1024) from the
+photo assets stored in assets/. Everything is local: no network, no clock,
+no randomness, so identical inputs always produce identical PNG bytes.
+
+Layout (measured from the approved page):
+  masthead -> double rule -> red date -> red rule -> kicker -> two-line
+  headline -> italic deck -> hero photo (340px) -> caption -> rule ->
+  three pictured stories -> red rule -> IN BRIEF strip -> footer.
 """
 
-import os
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = os.path.join(HERE, "assets")
-OUT = os.path.join(HERE, "entry.png")
-
-W, H = 1024, 1024
+PAGE_W = 1024
+PAGE_H = 1024
 MARGIN = 24
-RIGHT = 1000
-SPAN = RIGHT - MARGIN  # 976
+CONTENT_W = PAGE_W - 2 * MARGIN  # 976
 
-PAPER = (247, 243, 235)
-INK = (16, 16, 16)
-RED = (158, 16, 16)
-GREY = (88, 84, 76)
-BODY = (38, 36, 33)
+CREAM = (247, 243, 234)
+INK = (18, 18, 18)
+RED = (178, 34, 34)
+GREY = (112, 108, 100)
 
-FONTS = "/usr/share/fonts/truetype/liberation"
-SERIF = os.path.join(FONTS, "LiberationSerif-Regular.ttf")
-SERIF_BOLD = os.path.join(FONTS, "LiberationSerif-Bold.ttf")
-SERIF_ITALIC = os.path.join(FONTS, "LiberationSerif-Italic.ttf")
-SANS = os.path.join(FONTS, "LiberationSans-Regular.ttf")
-SANS_BOLD = os.path.join(FONTS, "LiberationSans-Bold.ttf")
+FONT_DIR = Path("/usr/share/fonts/truetype/noto")
+SERIF_BOLD = FONT_DIR / "NotoSerif-Bold.ttf"
+SERIF_ITALIC = FONT_DIR / "NotoSerif-Italic.ttf"
+SANS_BOLD = FONT_DIR / "NotoSans-Bold.ttf"
+SANS = FONT_DIR / "NotoSans-Regular.ttf"
 
+try:  # Pillow >= 9.1
+    RESAMPLE = Image.Resampling.LANCZOS
+except AttributeError:  # pragma: no cover - very old Pillow
+    RESAMPLE = Image.LANCZOS
 
-def F(path, size):
-    return ImageFont.truetype(path, size)
+MASTHEAD = "THE WORLD TODAY"
+DATE_LINE = "FRIDAY, NOVEMBER 20, 2026"
+KICKER = "SHENZHEN \u2022 THE TRILATERAL \u2022 APEC"
+HEADLINE = ["TRUMP, XI AND PUTIN SIGN", "PEACE DECLARATION"]
+DECK = (
+    "Nuclear powers vow a nuclear war \u201cmust never be fought\u201d "
+    "\u2014 but say nothing of Ukraine or Iran."
+)
+CAPTION = (
+    "Trump, Xi and Putin at Kylin Villa in Shenzhen after issuing "
+    "their four-point declaration on Thursday."
+)
+FOOTER = "theworld.today \u2014 All the news of Friday, November 20, 2026, on one page."
 
+# (asset file, headline lines) left to right.
+STORIES = [
+    ("iran-v4.webp", ["TRUMP PUTS IRAN DECISION", "OFF TO 2027"]),
+    ("cyclone-v4.webp", ["CYCLONE AKVAN HITS ODISHA", "\u2014 300,000 EVACUATED"]),
+    ("ipo-v4.webp", ["ANTHROPIC SOARS 17% IN", "RECORD $81BN DEBUT"]),
+]
 
-def wrap(draw, text, fnt, width):
-    """Greedy word wrap to lines no wider than width px."""
-    out = []
-    for para in text.split("\n"):
-        words = para.split()
-        if not words:
-            out.append("")
-            continue
-        cur = words[0]
-        for word in words[1:]:
-            trial = cur + " " + word
-            if draw.textlength(trial, font=fnt) <= width:
-                cur = trial
-            else:
-                out.append(cur)
-                cur = word
-        out.append(cur)
-    return out
-
-
-def centred(draw, y, text, fnt, fill, cx=512):
-    w = draw.textlength(text, font=fnt)
-    draw.text((cx - w / 2, y), text, font=fnt, fill=fill)
-
-
-def rule(draw, y, thick, fill, x0=MARGIN, x1=RIGHT):
-    draw.rectangle([x0, y, x1, y + thick - 1], fill=fill)
-    return y + thick
+# (headline, one-line deck) for the IN BRIEF strip, left to right.
+BRIEFS = [
+    ("EUROPE READY FOR TALKS WITH RUSSIA", "Berlin allies back a Ukraine peace push."),
+    ("ICJ: MYANMAR COMMITTED GENOCIDE", "World court rules on the Rohingya."),
+    ("GTA VI TOPS $1.8BN ON LAUNCH DAY", "19 million copies sold, Sensor Tower says."),
+]
 
 
-def photo(img, path, x, y, w, h, focus=0.45):
-    """Centre-crop to w:h around the vertical focus, resize, paste,
-    and draw a thin dark border. Returns the y below the photo."""
-    src = Image.open(path).convert("RGB")
-    sw, sh = src.size
-    want = w / h
-    have = sw / sh
-    if have > want:
-        cw = int(sh * want)
-        left = (sw - cw) // 2
-        box = (left, 0, left + cw, sh)
+def load_font(path: Path, size: int) -> ImageFont.FreeTypeFont:
+    """Load a TrueType font; fall back to Pillow's built-in bitmap font."""
+    try:
+        return ImageFont.truetype(str(path), size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def fit_font(draw: ImageDraw.ImageDraw, text: str, path: Path,
+             start_size: int, max_width: int) -> ImageFont.FreeTypeFont:
+    """Largest font size (<= start_size) at which `text` fits `max_width`."""
+    size = start_size
+    font = load_font(path, size)
+    while size > 8 and draw.textlength(text, font=font) > max_width:
+        size -= 1
+        font = load_font(path, size)
+    return font
+
+
+def cover_crop(photo: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """Centre-crop `photo` to the target aspect, then resize to fit."""
+    src_w, src_h = photo.size
+    target_ratio = target_w / target_h
+    if src_w / src_h > target_ratio:
+        # Too wide: trim the sides.
+        new_w = int(src_h * target_ratio)
+        left = (src_w - new_w) // 2
+        photo = photo.crop((left, 0, left + new_w, src_h))
     else:
-        ch = int(sw / want)
-        mid = int(sh * focus)
-        top = max(0, min(sh - ch, mid - ch // 2))
-        box = (0, top, sw, top + ch)
-    src = src.crop(box).resize((w, h), Image.LANCZOS)
-    img.paste(src, (x, y))
-    ImageDraw.Draw(img).rectangle(
-        [x, y, x + w - 1, y + h - 1], outline=INK, width=1)
-    return y + h
+        # Too tall: trim top and bottom.
+        new_h = int(src_w / target_ratio)
+        top = (src_h - new_h) // 2
+        photo = photo.crop((0, top, src_w, top + new_h))
+    return photo.resize((target_w, target_h), RESAMPLE)
 
 
-def main():
-    img = Image.new("RGB", (W, H), PAPER)
-    draw = ImageDraw.Draw(img)
-    y = 10
+def rule(draw: ImageDraw.ImageDraw, y: int, height: int, colour) -> None:
+    draw.rectangle([MARGIN, y, PAGE_W - MARGIN, y + height - 1], fill=colour)
 
-    # --- Masthead ---
-    centred(draw, y, "THE WORLD TODAY", F(SERIF_BOLD, 60), INK)
-    y += 68
-    y = rule(draw, y, 3, INK)
-    y += 3
-    y = rule(draw, y, 1, INK)
-    y += 8
 
-    # --- The date, big and red: the first thing the judge must see ---
-    centred(draw, y, "FRIDAY, NOVEMBER 20, 2026", F(SANS_BOLD, 40), RED)
-    y += 50
-    y = rule(draw, y, 1, RED)
-    y += 8
+def render_page(assets_dir: Path) -> Image.Image:
+    """Compose the whole front page and return it as an RGB image."""
+    page = Image.new("RGB", (PAGE_W, PAGE_H), CREAM)
+    draw = ImageDraw.Draw(page)
 
-    # --- Kicker + two-line headline + one deck line ---
-    draw.text((MARGIN, y), "SHENZHEN  \u2022  THE TRILATERAL  \u2022  APEC",
-              font=F(SANS_BOLD, 17), fill=RED)
-    y += 25
-    head = F(SERIF_BOLD, 54)
-    draw.text((MARGIN, y), "TRUMP, XI AND PUTIN SIGN", font=head, fill=INK)
-    y += 62
-    draw.text((MARGIN, y), "PEACE DECLARATION", font=head, fill=INK)
-    y += 62
-    deck = F(SERIF_ITALIC, 20)
-    deck_text = ("Nuclear powers vow a nuclear war \u201cmust never be "
-                 "fought\u201d \u2014 but say nothing of Ukraine or Iran.")
-    for line in wrap(draw, deck_text, deck, SPAN):
-        draw.text((MARGIN, y), line, font=deck, fill=BODY)
-        y += 26
-    y += 4
+    # Masthead, centred. Noto's ascender sits ~23 px above the caps at
+    # this size, so anchor at y=8 to keep the caps clear of the rules.
+    font = fit_font(draw, MASTHEAD, SERIF_BOLD, 62, 720)
+    draw.text((PAGE_W // 2, 8), MASTHEAD, font=font, fill=INK, anchor="ma")
 
-    # --- Hero photo + one caption line ---
-    y = photo(img, os.path.join(ASSETS, "hero-summit-v4.webp"),
-              MARGIN, y, SPAN, 340, focus=0.45)
-    draw = ImageDraw.Draw(img)
-    y += 6
-    cap = F(SERIF_ITALIC, 13)
-    caption = ("Trump, Xi and Putin at Kylin Villa in Shenzhen after "
-               "issuing their four-point declaration on Thursday.")
-    for line in wrap(draw, caption, cap, SPAN):
-        draw.text((MARGIN, y), line, font=cap, fill=GREY)
-        y += 17
-    y += 6
+    # Double rule under the masthead.
+    rule(draw, 80, 2, INK)
+    rule(draw, 85, 1, INK)
 
-    # --- Three pictured stories: photo + headline only, no deck ---
-    y = rule(draw, y, 2, INK)
-    y += 6
-    tiles = [
-        ("iran-v4.webp", "TRUMP PUTS IRAN DECISION OFF TO 2027"),
-        ("cyclone-v4.webp",
-         "CYCLONE AKVAN HITS ODISHA \u2014 300,000 EVACUATED"),
-        ("ipo-v4.webp", "ANTHROPIC SOARS 17% IN RECORD $81BN DEBUT"),
-    ]
-    tw, gap = 312, 20
-    tile_head = F(SERIF_BOLD, 20)
-    block_end = y
-    for i, (name, headline) in enumerate(tiles):
-        x = MARGIN + i * (tw + gap)
-        sy = photo(img, os.path.join(ASSETS, name), x, y, tw, 146,
-                   focus=0.45)
-        draw = ImageDraw.Draw(img)
-        sy += 6
-        for line in wrap(draw, headline, tile_head, tw):
-            draw.text((x, sy), line, font=tile_head, fill=INK)
-            sy += 25
-        block_end = max(block_end, sy)
-    y = block_end + 6
+    # Date in red, centred.
+    font = fit_font(draw, DATE_LINE, SANS_BOLD, 40, CONTENT_W)
+    draw.text((PAGE_W // 2, 98), DATE_LINE, font=font, fill=RED, anchor="ma")
+    rule(draw, 144, 1, RED)
 
-    # --- IN BRIEF: three one-line items ---
-    y = rule(draw, y, 2, RED)
-    y += 6
-    draw.text((MARGIN, y), "IN BRIEF", font=F(SANS_BOLD, 14), fill=RED)
-    y += 22
-    briefs = [
-        ("EUROPE READY FOR TALKS WITH RUSSIA",
-         "Berlin allies back a Ukraine peace push."),
-        ("ICJ: MYANMAR COMMITTED GENOCIDE",
-         "World court rules on the Rohingya."),
-        ("GTA VI TOPS $1.8BN ON LAUNCH DAY",
-         "19 million copies sold, Sensor Tower says."),
-    ]
-    b_head = F(SANS_BOLD, 14)
-    b_body = F(SERIF, 13)
-    brief_end = y
-    for i, (headline, body) in enumerate(briefs):
-        x = MARGIN + i * (tw + gap)
-        by = y
-        draw.text((x, by), headline, font=b_head, fill=INK)
-        by += 18
-        for line in wrap(draw, body, b_body, tw)[:2]:
-            draw.text((x, by), line, font=b_body, fill=BODY)
-            by += 17
-        brief_end = max(brief_end, by)
-    y = brief_end + 8
+    # Kicker, red, left aligned.
+    font = load_font(SANS_BOLD, 19)
+    draw.text((MARGIN, 152), KICKER, font=font, fill=RED, anchor="la")
 
-    # --- Footer ---
-    centred(draw, y,
-            "theworld.today  \u2014  All the news of Friday, "
-            "November 20, 2026, on one page.",
-            F(SERIF_ITALIC, 12), GREY)
-    y += 18
+    # Two-line headline, black serif.
+    font = load_font(SERIF_BOLD, 54)
+    draw.text((MARGIN, 174), HEADLINE[0], font=font, fill=INK, anchor="la")
+    draw.text((MARGIN, 234), HEADLINE[1], font=font, fill=INK, anchor="la")
 
-    assert y <= H, f"layout overflow: bottom y={y} > {H}"
-    print(f"layout bottom y={y} (page height {H})")
+    # Italic deck, shrunk if needed so it stays on one line, with a
+    # clear gap above the hero photo.
+    font = fit_font(draw, DECK, SERIF_ITALIC, 21, CONTENT_W)
+    draw.text((MARGIN, 288), DECK, font=font, fill=INK, anchor="la")
 
-    img.save(OUT, format="PNG", optimize=True)
-    size = os.path.getsize(OUT)
-    if size > 1_048_576:
-        for quality in (88, 82, 76):
-            img.convert("RGB").save(OUT, format="JPEG", quality=quality,
-                                    optimize=True)
-            size = os.path.getsize(OUT)
-            print(f"PNG over 1 MiB; saved JPEG quality {quality}: "
-                  f"{size} bytes")
-            if size <= 1_048_576:
-                break
-    print(f"wrote {OUT}: {size} bytes, {img.size[0]}x{img.size[1]}")
+    # Hero photo: full content width, 357 px tall.
+    hero = Image.open(assets_dir / "hero-summit-v4.webp").convert("RGB")
+    page.paste(cover_crop(hero, CONTENT_W, 357), (MARGIN, 314))
+
+    # Caption under the hero.
+    font = fit_font(draw, CAPTION, SERIF_ITALIC, 16, CONTENT_W)
+    draw.text((MARGIN, 678), CAPTION, font=font, fill=INK, anchor="la")
+    rule(draw, 702, 2, INK)
+
+    # Three pictured stories.
+    col_w = 312
+    gap = (CONTENT_W - 3 * col_w) // 2  # 20
+    for i, (asset, lines) in enumerate(STORIES):
+        x = MARGIN + i * (col_w + gap)
+        photo = Image.open(assets_dir / asset).convert("RGB")
+        page.paste(cover_crop(photo, col_w, 142), (x, 714))
+        font = load_font(SANS_BOLD, 21)
+        draw.text((x, 866), lines[0], font=font, fill=INK, anchor="la")
+        draw.text((x, 890), lines[1], font=font, fill=INK, anchor="la")
+
+    rule(draw, 918, 1, RED)
+
+    # IN BRIEF strip.
+    font = load_font(SANS_BOLD, 17)
+    draw.text((MARGIN, 926), "IN BRIEF", font=font, fill=RED, anchor="la")
+    for i, (head, deck) in enumerate(BRIEFS):
+        x = MARGIN + i * (col_w + gap)
+        head_font = fit_font(draw, head, SANS_BOLD, 15, col_w)
+        draw.text((x, 948), head, font=head_font, fill=INK, anchor="la")
+        deck_font = fit_font(draw, deck, SANS, 14, col_w)
+        draw.text((x, 968), deck, font=deck_font, fill=INK, anchor="la")
+
+    # Footer, centred, grey italic.
+    font = load_font(SERIF_ITALIC, 14)
+    draw.text((PAGE_W // 2, 1000), FOOTER, font=font, fill=GREY, anchor="ma")
+
+    return page
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        print("usage: compose.py <output.png>", file=sys.stderr)
+        return 2
+    out_path = Path(argv[1]).resolve()
+    here = Path(__file__).resolve().parent
+    # Never clobber the approved entry image with a re-render.
+    if out_path == (here / "entry.png").resolve():
+        print("refusing to overwrite entry.png", file=sys.stderr)
+        return 2
+    assets_dir = here / "assets"
+    page = render_page(assets_dir)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    page.save(out_path, format="PNG")
+    print(f"wrote {out_path} {page.size[0]}x{page.size[1]}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(sys.argv))

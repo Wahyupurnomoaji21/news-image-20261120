@@ -1,54 +1,77 @@
 #!/usr/bin/env python3
-"""news-image-20261120 entrypoint: copy entry.png to the output dir.
+"""Entrypoint for the news-image-20261120 entry (harness program/v1).
 
-The front page is rendered ahead of time by compose.py (Pillow, local
-assets only) and stored in this repository as entry.png. This program
-does no drawing, no resizing and no network access: it only copies the
-stored bytes to $MAKEFUN_OUTPUT_DIR/entry.png (default /output), after
-checking the file fits the competition's 1 MiB cap. Two runs therefore
-always write identical bytes.
+The approved front-page image lives in this repo as entry.png. This program
+does one thing: copy that file byte-for-byte to the harness output
+directory as entry.png, then verify the copy by size and SHA-256.
 
-Local test:
-    rm -rf out1 out2
-    MAKEFUN_OUTPUT_DIR=out1 python3 main.py
-    MAKEFUN_OUTPUT_DIR=out2 python3 main.py
-    cmp out1/entry.png out2/entry.png
+No rendering happens here, no network, no randomness: two runs always
+write identical bytes.
+
+Output directory comes from MAKEFUN_OUTPUT_DIR (default /output).
 """
+
+from __future__ import annotations
 
 import hashlib
 import os
 import sys
+from pathlib import Path
 
-SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-LIMIT = 1_048_576
+SOURCE_NAME = "entry.png"
+MAX_BYTES = 1024 * 1024  # harness limit: image must be <= 1 MiB
 
 
-def fail(msg):
-    print(f"error: {msg}", file=sys.stderr)
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def fail(message: str) -> int:
+    print(f"error: {message}", file=sys.stderr)
     return 1
 
 
-def main():
-    if not os.path.isfile(SOURCE):
-        return fail(f"entry.png missing: {SOURCE} (run: python3 compose.py)")
-    with open(SOURCE, "rb") as fh:
-        blob = fh.read()
-    if len(blob) > LIMIT:
-        return fail(f"entry.png is {len(blob)} bytes, over the {LIMIT} byte cap")
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    target = os.path.join(out_dir, "entry.png")
-    with open(target, "wb") as fh:
-        fh.write(blob)
-    digest = hashlib.sha256(blob).hexdigest()
-    with open(target, "rb") as fh:
-        written = fh.read()
-    if hashlib.sha256(written).hexdigest() != digest:
-        return fail(f"verify failed: {target} differs from entry.png")
-    print(f"wrote {len(blob)} bytes to {target}")
-    print(f"sha256: {digest}")
+def run() -> int:
+    here = Path(__file__).resolve().parent
+    source = here / SOURCE_NAME
+    if not source.is_file():
+        return fail(f"missing {source}")
+
+    payload = source.read_bytes()
+    if len(payload) > MAX_BYTES:
+        return fail(
+            f"{SOURCE_NAME} is {len(payload)} bytes, over the "
+            f"{MAX_BYTES} byte limit"
+        )
+    source_hash = sha256_hex(payload)
+
+    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return fail(f"cannot create output dir {out_dir}: {exc}")
+
+    target = out_dir / SOURCE_NAME
+    # Write via a temp file and rename, so an interrupted run never
+    # leaves a half-written entry.png behind.
+    tmp_target = out_dir / (SOURCE_NAME + ".tmp")
+    try:
+        tmp_target.write_bytes(payload)
+        os.replace(tmp_target, target)
+    except OSError as exc:
+        return fail(f"cannot write {target}: {exc}")
+
+    written = target.read_bytes()
+    if written != payload:
+        return fail(f"verify failed: {target} differs from {source}")
+    written_hash = sha256_hex(written)
+    if written_hash != source_hash:
+        return fail("verify failed: sha256 mismatch after copy")
+
+    print(f"wrote {target} ({len(written)} bytes)")
+    print(f"sha256 {written_hash}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())
